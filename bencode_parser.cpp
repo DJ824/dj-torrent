@@ -1,0 +1,152 @@
+#include "bencode_parser.h"
+#include <cctype>
+
+BencodeParser::BencodeValue::BencodeValue(const BencodeString& s)
+    : type_(STRING), string_val_(s) {}
+
+BencodeParser::BencodeValue::BencodeValue(BencodeInteger i)
+    : type_(INTEGER), int_val_(i) {}
+
+BencodeParser::BencodeValue::BencodeValue(const BencodeList& l)
+    : type_(LIST), list_val_(l) {}
+
+BencodeParser::BencodeValue::BencodeValue(const BencodeDict& d)
+    : type_(DICT), dict_val_(d) {}
+
+bool BencodeParser::BencodeValue::is_string() const { return type_ == STRING; }
+bool BencodeParser::BencodeValue::is_integer() const { return type_ == INTEGER; }
+bool BencodeParser::BencodeValue::is_list() const { return type_ == LIST; }
+bool BencodeParser::BencodeValue::is_dict() const { return type_ == DICT; }
+const BencodeParser::BencodeString& BencodeParser::BencodeValue::as_string() const { return string_val_; }
+BencodeParser::BencodeInteger BencodeParser::BencodeValue::as_integer() const { return int_val_; }
+const BencodeParser::BencodeList& BencodeParser::BencodeValue::as_list() const { return list_val_; }
+const BencodeParser::BencodeDict& BencodeParser::BencodeValue::as_dict() const { return dict_val_; }
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parse(const std::string& data) {
+    size_t pos = 0;
+    return parse(data, pos);
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parse(const std::string& data, size_t& pos) {
+    return parseValue(data, pos);
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parseValue(const std::string& data, size_t& pos) {
+    if (pos >= data.length()) {
+        std::cerr << "BencodeParser: Position beyond data length" << std::endl;
+        return nullptr;
+    }
+
+    char c = data[pos];
+
+    if (c == 'i') {
+        return parseInteger(data, pos);
+    } else if (c == 'l') {
+        return parseList(data, pos);
+    } else if (c == 'd') {
+        return parseDictionary(data, pos);
+    } else if (std::isdigit(c)) {
+        return parseString(data, pos);
+    } else {
+        std::cerr << "BencodeParser: Unknown type '" << c << "' at position " << pos << std::endl;
+        return nullptr;
+    }
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parseInteger(const std::string& data, size_t& pos) {
+    if (pos >= data.length() || data[pos] != 'i') {
+        return nullptr;
+    }
+
+    ++pos;
+    size_t end_pos = data.find('e', pos);
+
+    if (end_pos == std::string::npos) {
+        std::cerr << "BencodeParser: Integer missing closing 'e'" << std::endl;
+        return nullptr;
+    }
+
+    std::string num_str = data.substr(pos, end_pos - pos);
+    pos = end_pos + 1; // Skip 'e'
+
+    try {
+        int64_t value = std::stoll(num_str);
+        return std::make_shared<BencodeValue>(value);
+    } catch (const std::exception& e) {
+        std::cerr << "BencodeParser: Invalid integer '" << num_str << "'" << std::endl;
+        return nullptr;
+    }
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parseString(const std::string& data, size_t& pos) {
+    size_t colon_pos = data.find(':', pos);
+    if (colon_pos == std::string::npos) {
+        return nullptr;
+    }
+
+    std::string length_str = data.substr(pos, colon_pos - pos);
+    size_t length;
+
+    try {
+        length = std::stoull(length_str);
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+    pos = colon_pos + 1;
+    if (pos + length > data.length()) {
+        return nullptr;
+    }
+
+    std::string result = data.substr(pos, length);
+    pos += length;
+    return std::make_shared<BencodeValue>(result);
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parseList(const std::string& data, size_t& pos) {
+    if (pos >= data.length() || data[pos] != 'l') {
+        return nullptr;
+    }
+
+    ++pos;
+    BencodeList list;
+
+    while (pos < data.length() && data[pos] != 'e') {
+        auto value = parseValue(data, pos);
+        if (!value) {
+            return nullptr;
+        }
+        list.push_back(value);
+    }
+    if (pos >= data.length() || data[pos] != 'e') {
+        return nullptr;
+    }
+
+    ++pos;
+    return std::make_shared<BencodeValue>(list);
+}
+
+std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parseDictionary(const std::string& data, size_t& pos) {
+    if (pos >= data.length() || data[pos] != 'd') {
+        return nullptr;
+    }
+    ++pos;
+    BencodeDict dict;
+
+    while (pos < data.length() && data[pos] != 'e') {
+        auto key_value = parseString(data, pos);
+        if (!key_value || key_value->type_ != BencodeValue::STRING) {
+            return nullptr;
+        }
+        auto value = parseValue(data, pos);
+        if (!value) {
+            return nullptr;
+        }
+        dict[key_value->as_string()] = value;
+    }
+
+    if (pos >= data.length() || data[pos] != 'e') {
+        return nullptr;
+    }
+    ++pos;
+    return std::make_shared<BencodeValue>(dict);
+}

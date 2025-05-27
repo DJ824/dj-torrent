@@ -1,0 +1,9 @@
+*.o
+*.exe
+*.out
+build/
+Debug/
+Release/
+.idea/
+.DS_Store
+cmake-build-debug/
