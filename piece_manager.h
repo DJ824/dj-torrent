@@ -75,7 +75,7 @@ private:
     bool initialize_file();
     bool verify_piece(int piece_index);
     bool write_piece_to_disk(int piece_index);
-    std::string calculate_piece_hash(const std::vector<char>& piece_data);
+    static std::string calculate_piece_hash(const std::vector<char>& piece_data);
     size_t get_piece_size(int piece_index) const;
     bool is_valid_piece_index(int piece_index) const;
     size_t get_block_index(size_t block_offset) const;

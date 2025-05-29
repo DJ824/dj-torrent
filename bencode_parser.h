@@ -38,11 +38,11 @@ public:
     static std::shared_ptr<BencodeValue> parse(const std::string& data, size_t& pos);
 
 private:
-    static std::shared_ptr<BencodeValue> parseValue(const std::string& data, size_t& pos);
-    static std::shared_ptr<BencodeValue> parseInteger(const std::string& data, size_t& pos);
-    static std::shared_ptr<BencodeValue> parseString(const std::string& data, size_t& pos);
-    static std::shared_ptr<BencodeValue> parseList(const std::string& data, size_t& pos);
-    static std::shared_ptr<BencodeValue> parseDictionary(const std::string& data, size_t& pos);
+    static std::shared_ptr<BencodeValue> parse_value(const std::string& data, size_t& pos);
+    static std::shared_ptr<BencodeValue> parse_integer(const std::string& data, size_t& pos);
+    static std::shared_ptr<BencodeValue> parse_string(const std::string& data, size_t& pos);
+    static std::shared_ptr<BencodeValue> parse_list(const std::string& data, size_t& pos);
+    static std::shared_ptr<BencodeValue> parse_dictionary(const std::string& data, size_t& pos);
 };
 using BencodeValue = BencodeParser::BencodeValue;
 using BencodeDict = BencodeParser::BencodeDict;
