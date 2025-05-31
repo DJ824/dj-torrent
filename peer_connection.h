@@ -32,7 +32,7 @@ public:
     struct PeerState {
         bool am_choking = true;
         bool am_interested = false;
-        bool peer_chocking = true;
+        bool peer_choking = true;
         bool peer_interested = false;
     };
 
@@ -59,16 +59,15 @@ private:
     std::atomic<bool> running_;
 
     PeerState state_;
+    // max of 32k pieces
     std::bitset<32768> peer_bitfield_;
     bool handshake_complete_;
 
     std::thread receive_thread_;
-    std::thread send_thread_;
     mutable std::mutex state_mutex_;
     mutable std::mutex send_mutex_;
 
     std::queue<PendingRequest> pending_requests_;
-    std::queue<std::vector<uint8_t>> outgoing_messages_;
     static constexpr size_t MAX_PENDING_REQUESTS = 10;
     static constexpr std::chrono::seconds REQUEST_TIMEOUT{30};
 
@@ -87,13 +86,16 @@ public:
 
     bool send_interested();
     bool send_not_interested();
+    bool send_choke();
+    bool send_unchoke();
+    bool send_bitfield();
     bool send_request(uint32_t piece, uint32_t offset, uint32_t length);
     bool send_cancel(uint32_t piece, uint32_t offset, uint32_t length);
     bool send_have(uint32_t piece_index);
 
     const Peer& get_peer() const { return peer_; }
     PeerState get_state() const;
-    bool has_piece(uint32_t piece_index) const;
+    bool peer_has_piece(uint32_t piece_index) const;
     size_t get_available_piece_count() const;
 
     double get_download_rate() const;
@@ -106,7 +108,6 @@ private:
     bool receive_handshake();
 
     void receive_loop();
-    void send_loop();
     bool receive_message();
     bool send_message(const std::vector<uint8_t>& message);
 
@@ -121,7 +122,9 @@ private:
     void handle_cancel(uint32_t piece, uint32_t offset, uint32_t length);
 
     std::vector<uint8_t> create_handshake_message();
+    bool send_message_immediate(const std::vector<uint8_t> &message);
     std::vector<uint8_t> create_message(MessageType type);
+    std::vector<uint8_t> create_cancel_message(uint32_t piece, uint32_t uint32, uint32_t length);
     std::vector<uint8_t> create_have_message(uint32_t piece_index);
     std::vector<uint8_t> create_request_message(uint32_t piece_index, uint32_t offset, uint32_t length);
     std::vector<uint8_t> create_piece_message(uint32_t piece, uint32_t offset, const std::vector<uint8_t>& data);

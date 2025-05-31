@@ -169,35 +169,6 @@ bool PieceManager::add_piece_block(int piece_index, int block_offset, const std:
     return true;
 }
 
-// breaks a piece up into blocks then processes
-bool PieceManager::add_complete_piece(int piece_index, const std::vector<char>& piece_data) {
-    size_t piece_size = get_piece_size(piece_index);
-
-    if (piece_data.size() != piece_size) {
-        std::cerr << "piece " << piece_index << " size mismatch, expected: "
-                  << piece_size << ", got: " << piece_data.size() << std::endl;
-        return false;
-    }
-
-    std::cout << "adding complete piece " << piece_index << " (" << piece_size << " bytes)" << std::endl;
-
-    for (size_t offset = 0; offset < piece_size; offset += BLOCK_SIZE) {
-        size_t block_size = std::min(BLOCK_SIZE, piece_size - offset);
-
-        std::vector<char> block_data(
-            piece_data.begin() + offset,
-            piece_data.begin() + offset + block_size
-        );
-
-        if (!add_piece_block(piece_index, static_cast<int>(offset), block_data)) {
-            std::cerr << "failed to add block at offset " << offset << " for piece " << piece_index << std::endl;
-            return false;
-        }
-    }
-
-    return true;
-}
-
 // verifies the piece hash and writes to disk
 bool PieceManager::complete_piece(int piece_index) {
     if (!is_valid_piece_index(piece_index)) {

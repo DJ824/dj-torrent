@@ -57,7 +57,6 @@ public:
     int get_next_needed_piece();
     bool request_piece(int piece_index);
     bool add_piece_block(int piece_index, int block_offset, const std::vector<char>& block_data);
-    bool add_complete_piece(int piece_index, const std::vector<char>& piece_data);
     bool has_piece(int piece_index) const;
     bool is_complete() const;
     PieceState get_piece_state(int piece_index) const;

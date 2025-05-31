@@ -26,6 +26,8 @@ public:
     size_t bytes_uploaded_;
 
     std::string peer_id_;
+    bool supports_fast_extension_ = false;
+    bool supports_dht_ = false;
 
 
     Peer(const std::string& ip_addr, uint16_t port_num);

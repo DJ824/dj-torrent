@@ -110,7 +110,7 @@ bool Peer::operator<(const Peer& other) const {
 
 std::string Peer::to_string() const {
     std::ostringstream oss;
-    oss << ip << ":" << port;
+    oss << ip_ << ":" << port_;
 
     const char* state_names[] = {
         "DISCOVERED", "CONNECTING", "CONNECTED",
