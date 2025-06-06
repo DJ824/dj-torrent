@@ -30,7 +30,7 @@ private:
     size_t bytes_downloaded_ = 0;
     size_t total_bytes_ = 0;
 
-    static const size_t BLOCK_SIZE = 16384;
+    static constexpr size_t BLOCK_SIZE = 16384;
 
     struct PieceProgress {
         std::vector<bool> blocks_received_;

@@ -81,33 +81,105 @@ bool TorrentFile::extract_info_dict(const BencodeValue& info) {
     return true;
 }
 
+// Replace the calculate_info_hash method in torrent_file.cpp with this single function
+
 std::string TorrentFile::calculate_info_hash(const std::string& torrent_data) {
-    size_t info_start = torrent_data.find("4:info");
-    if (info_start == std::string::npos) return "";
+    std::cout << "Calculating info hash from torrent data (" << torrent_data.length() << " bytes)" << std::endl;
 
-    info_start += 6;
-    size_t pos = info_start;
-    size_t dict_count = 1;
-
-    if (torrent_data[pos] != 'd') return "";
-    ++pos;
-
-    while (pos < torrent_data.length() && dict_count > 0) {
-        if (torrent_data[pos] == 'd') {
-            ++dict_count;
-        } else if (torrent_data[pos] == 'e') {
-            --dict_count;
-        }
-        ++pos;
+    // Find the start of the info dictionary by looking for "4:infod"
+    size_t info_key_pos = torrent_data.find("4:info");
+    if (info_key_pos == std::string::npos) {
+        std::cerr << "Could not find '4:info' key in torrent data" << std::endl;
+        return "";
     }
 
-    std::string info_data = torrent_data.substr(info_start, pos - info_start);
+    // The info dictionary starts right after "4:info"
+    size_t info_start = info_key_pos + 6; // Skip "4:info"
 
+    if (info_start >= torrent_data.length() || torrent_data[info_start] != 'd') {
+        std::cerr << "Info dictionary does not start with 'd'" << std::endl;
+        return "";
+    }
+
+    // Now parse through the info dictionary to find its end
+    size_t pos = info_start + 1; // Skip the opening 'd'
+    int dict_depth = 1;
+
+    while (pos < torrent_data.length() && dict_depth > 0) {
+        char c = torrent_data[pos];
+
+        if (c == 'd') {
+            // Start of nested dictionary
+            dict_depth++;
+            pos++;
+        } else if (c == 'e') {
+            // End of dictionary
+            dict_depth--;
+            pos++;
+        } else if (c == 'l') {
+            // Start of list - just move past it, don't affect dict depth
+            pos++;
+        } else if (c == 'i') {
+            // Integer: format is i<number>e
+            pos++; // Skip 'i'
+            size_t end_pos = torrent_data.find('e', pos);
+            if (end_pos == std::string::npos) {
+                std::cerr << "Malformed integer in info dictionary" << std::endl;
+                return "";
+            }
+            pos = end_pos + 1; // Skip to after the 'e'
+        } else if (std::isdigit(c)) {
+            // String: format is <length>:<string>
+            size_t colon_pos = torrent_data.find(':', pos);
+            if (colon_pos == std::string::npos) {
+                std::cerr << "Malformed string length in info dictionary" << std::endl;
+                return "";
+            }
+
+            // Parse the length
+            std::string length_str = torrent_data.substr(pos, colon_pos - pos);
+            size_t length;
+            try {
+                length = std::stoull(length_str);
+            } catch (const std::exception& e) {
+                std::cerr << "Invalid string length: " << length_str << std::endl;
+                return "";
+            }
+
+            // Skip to after the string data
+            pos = colon_pos + 1 + length;
+        } else {
+            std::cerr << "Unexpected character '" << c << "' in info dictionary at position " << pos << std::endl;
+            return "";
+        }
+    }
+
+    if (dict_depth != 0) {
+        std::cerr << "Malformed info dictionary - unmatched braces (depth: " << dict_depth << ")" << std::endl;
+        return "";
+    }
+
+    // Extract the complete info dictionary including the 'd' and 'e'
+    std::string info_bencode = torrent_data.substr(info_start, pos - info_start);
+
+    std::cout << "Info dictionary length: " << info_bencode.length() << " bytes" << std::endl;
+    std::cout << "Info dictionary preview: " << info_bencode.substr(0, std::min(size_t(100), info_bencode.length())) << std::endl;
+
+    // Calculate SHA1 hash of the info dictionary
     unsigned char hash[SHA_DIGEST_LENGTH];
-    SHA1(reinterpret_cast<const unsigned char*>(info_data.c_str()),
-         info_data.length(), hash);
+    SHA1(reinterpret_cast<const unsigned char*>(info_bencode.c_str()),
+         info_bencode.length(), hash);
 
-    return std::string(reinterpret_cast<char*>(hash), SHA_DIGEST_LENGTH);
+    std::string hash_string(reinterpret_cast<char*>(hash), SHA_DIGEST_LENGTH);
+
+    // Debug output
+    std::cout << "Calculated info hash (hex): ";
+    for (unsigned char c : hash_string) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(static_cast<unsigned char>(c));
+    }
+    std::cout << std::dec << std::endl;
+
+    return hash_string;
 }
 
 const std::string& TorrentFile::get_announce_url() const { return announce_url_; }

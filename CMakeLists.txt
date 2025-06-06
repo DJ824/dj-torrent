@@ -4,7 +4,8 @@ project(dj_torrent)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_VERBOSE_MAKEFILE ON)
+# Remove verbose makefile for cleaner output
+# set(CMAKE_VERBOSE_MAKEFILE ON)
 
 if(APPLE)
     set(POSSIBLE_OPENSSL_ROOTS
@@ -28,15 +29,23 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 
+# Fix the relative paths - use current directory
 add_executable(dj_torrent
         main.cpp
         torrent_file.cpp
         tracker.cpp
         bencode_parser.cpp
+        piece_manager.cpp
+        peer.cpp
+        peer_connection.cpp
+        peer_manager.cpp
         bencode_parser.h
         torrent_file.h
         piece_manager.h
-        piece_manager.cpp
+        peer.h
+        peer_connection.h
+        peer_manager.h
+        tracker.h
 )
 
 target_link_libraries(dj_torrent

@@ -145,8 +145,8 @@ void PeerManager::management_loop() {
             last_maintenance = now;
         }
 
-        std::unique_lock<std::mutex> lock(connections_mutex_);
-        auto wait_result = work_available_.wait_for(lock, MAINTENANCE_INTERVAL);
+        std::unique_lock<std::mutex> cv_lock(cv_mutex_);
+        auto wait_result = work_available_.wait_for(cv_lock, MAINTENANCE_INTERVAL);
 
         if (wait_result == std::cv_status::no_timeout) {
             std::cout << "peer manager woken by notification" << std::endl;
@@ -175,12 +175,18 @@ void PeerManager::connect_to_new_peers() {
 
     std::cout << "attempting to connect to " << peers_to_connect << " new peers" << std::endl;
 
-    auto best_peers = select_best_peers_to_connect();
+    // Get indices of best peers to connect to
+    auto best_peer_indices = select_best_peers_to_connect();
 
-    for (size_t i = 0; i < std::min(peers_to_connect, best_peers.size()); ++i) {
-        auto& peer = best_peers[i];
+    for (size_t i = 0; i < std::min(peers_to_connect, best_peer_indices.size()); ++i) {
+        size_t peer_index = best_peer_indices[i];
+
+        // Reference the peer directly from pending_peers_ (persistent storage)
+        auto& peer = pending_peers_[peer_index];
+
         if (should_connect_to_peer(peer)) {
             try {
+                // Create connection with reference to persistent peer
                 auto connection = std::make_unique<PeerConnection>(peer, this, torrent_, peer_id_);
 
                 if (connection->connect()) {
@@ -195,18 +201,26 @@ void PeerManager::connect_to_new_peers() {
                     log_connection_attempt(peer, false);
                 }
 
-                auto it = std::find_if(pending_peers_.begin(), pending_peers_.end(),
-                                      [&peer](const Peer& p) { return p == peer; });
-                if (it != pending_peers_.end()) {
-                    pending_peers_.erase(it);
-                }
-
             } catch (const std::exception& e) {
                 std::cerr << "exception while connecting to " << peer.to_string()
                           << " - " << e.what() << std::endl;
                 peer.mark_connection_failure();
                 stats_.failed_connections++;
                 log_connection_attempt(peer, false);
+            }
+        }
+    }
+
+    // Remove successfully connected or failed peers from pending list
+    // Go backwards to avoid index shifting issues
+    for (int i = static_cast<int>(best_peer_indices.size()) - 1; i >= 0; --i) {
+        size_t peer_index = best_peer_indices[i];
+        if (peer_index < pending_peers_.size()) {
+            const auto& peer = pending_peers_[peer_index];
+            // Remove if connected or exhausted connection attempts
+            if (peer.state == Peer::CONNECTED || peer.state == Peer::HANDSHAKED ||
+                peer.connection_attempts_ >= 3) {
+                pending_peers_.erase(pending_peers_.begin() + peer_index);
             }
         }
     }
@@ -244,47 +258,73 @@ void PeerManager::distribute_piece_requests() {
     }
 }
 
+
 PeerManager::WorkAssignment PeerManager::get_work_for_peer(PeerConnection* peer) {
-    for (int attempt = 0; attempt < 10; ++attempt) {
-        int piece_index = piece_manager_->get_next_needed_piece();
-        if (piece_index < 0) {
-            std::cout << "no more pieces needed" << std::endl;
-            return WorkAssignment();
-        }
+    size_t total_pieces = torrent_->get_piece_hashes().size();
 
-        if (!peer->peer_has_piece(piece_index)) {
-            std::cout << "peer " << peer->get_peer().to_string()
-                      << " doesn't have piece " << piece_index << ", trying another" << std::endl;
-            continue;
-        }
+    for (size_t piece = 0; piece < total_pieces; ++piece) {
+        if (peer->peer_has_piece(piece)) {
+            auto piece_state = piece_manager_->get_piece_state(piece);
 
-        auto missing_blocks = piece_manager_->get_missing_blocks(piece_index);
-        if (missing_blocks.empty()) {
-            std::cout << "piece " << piece_index << " has no missing blocks, trying next" << std::endl;
-            continue;
-        }
+            if (piece_state == PieceManager::DOWNLOADING || piece_state == PieceManager::REQUESTED) {
+                auto missing_blocks = piece_manager_->get_missing_blocks(piece);
+                if (!missing_blocks.empty()) {
+                    size_t blocks_to_assign = std::min(missing_blocks.size(), size_t(10)); // Increased from 5
+                    std::vector<std::pair<int, int>> selected_blocks;
+                    for (size_t i = 0; i < blocks_to_assign; ++i) {
+                        selected_blocks.push_back(missing_blocks[i]);
+                    }
 
-        size_t blocks_to_assign = std::min(missing_blocks.size(), size_t(5));
-        std::vector<std::pair<int, int>> selected_blocks;
-        for (size_t i = 0; i < blocks_to_assign; ++i) {
-            selected_blocks.push_back(missing_blocks[i]);
-        }
+                    std::cout << "continuing piece " << piece << " with "
+                              << selected_blocks.size() << " more blocks (total "
+                              << missing_blocks.size() << " remaining) for "
+                              << peer->get_peer().to_string() << std::endl;
 
-        if (piece_manager_->request_piece(piece_index)) {
-            std::cout << "selected piece " << piece_index << " with "
-                      << selected_blocks.size() << " blocks for "
-                      << peer->get_peer().to_string() << std::endl;
-            return WorkAssignment(piece_index, std::move(selected_blocks));
-        } else {
-            std::cout << "failed to request piece " << piece_index << ", trying next" << std::endl;
+                    return WorkAssignment(piece, std::move(selected_blocks));
+                }
+            }
         }
     }
 
-    std::cout << "could not find work after 10 attempts for "
-              << peer->get_peer().to_string() << std::endl;
+    std::vector<int> available_pieces;
+    for (size_t piece = 0; piece < total_pieces; ++piece) {
+        if (peer->peer_has_piece(piece) && !piece_manager_->has_piece(piece)) {
+            auto piece_state = piece_manager_->get_piece_state(piece);
+            if (piece_state == PieceManager::NEEDED) {
+                available_pieces.push_back(piece);
+            }
+        }
+    }
+
+    if (available_pieces.empty()) {
+        std::cout << "peer " << peer->get_peer().to_string()
+                  << " has no pieces we need" << std::endl;
+        return WorkAssignment();
+    }
+
+    for (int piece_index : available_pieces) {
+        if (piece_manager_->request_piece(piece_index)) {
+            auto missing_blocks = piece_manager_->get_missing_blocks(piece_index);
+            if (!missing_blocks.empty()) {
+                size_t blocks_to_assign = std::min(missing_blocks.size(), size_t(10));
+                std::vector<std::pair<int, int>> selected_blocks;
+                for (size_t i = 0; i < blocks_to_assign; ++i) {
+                    selected_blocks.push_back(missing_blocks[i]);
+                }
+
+                std::cout << "started new piece " << piece_index << " with "
+                          << selected_blocks.size() << " blocks for "
+                          << peer->get_peer().to_string() << std::endl;
+
+                return WorkAssignment(piece_index, std::move(selected_blocks));
+            }
+        }
+    }
+
+    std::cout << "no available work for " << peer->get_peer().to_string()
+              << " (tried " << available_pieces.size() << " pieces)" << std::endl;
     return WorkAssignment();
 }
-
 void PeerManager::update_choking_decisions() {
     std::lock_guard<std::mutex> lock(connections_mutex_);
     auto now = std::chrono::steady_clock::now();
@@ -372,15 +412,27 @@ void PeerManager::perform_optimistic_unchoke() {
     }
 }
 
-std::vector<Peer> PeerManager::select_best_peers_to_connect() {
-    std::sort(pending_peers_.begin(), pending_peers_.end());
-    std::vector<Peer> good_peers;
-    for (auto& peer : pending_peers_) {
-        if (peer.should_retry_connection()) {
-            good_peers.push_back(peer);
+std::vector<size_t> PeerManager::select_best_peers_to_connect() {
+    std::vector<std::pair<size_t, std::reference_wrapper<Peer>>> indexed_peers;
+
+    for (size_t i = 0; i < pending_peers_.size(); ++i) {
+        if (pending_peers_[i].should_retry_connection()) {
+            indexed_peers.emplace_back(i, std::ref(pending_peers_[i]));
         }
     }
-    return good_peers;
+
+    std::sort(indexed_peers.begin(), indexed_peers.end(),
+        [](const auto& a, const auto& b) {
+            return a.second.get() < b.second.get();
+        });
+
+    std::vector<size_t> good_indices;
+    good_indices.reserve(indexed_peers.size());
+    for (const auto& pair : indexed_peers) {
+        good_indices.push_back(pair.first);
+    }
+
+    return good_indices;
 }
 
 bool PeerManager::should_connect_to_peer(const Peer& peer) const {

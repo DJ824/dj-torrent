@@ -40,7 +40,7 @@ private:
     std::vector<std::unique_ptr<PeerConnection>> connections_;
     std::vector<Peer> pending_peers_;
     mutable std::mutex connections_mutex_;
-
+    mutable std::mutex cv_mutex_;
     std::thread manager_thread_;
     std::atomic<bool> running_;
     std::condition_variable work_available_;
@@ -83,7 +83,7 @@ private:
     void cleanup_dead_connections();
     void distribute_piece_requests();
     WorkAssignment get_work_for_peer(PeerConnection* peer);
-    std::vector<Peer> select_best_peers_to_connect();d
+    std::vector<size_t> select_best_peers_to_connect();
     bool should_connect_to_peer(const Peer& peer) const;
     void update_stats();
     bool is_already_connected(const Peer& peer) const;
