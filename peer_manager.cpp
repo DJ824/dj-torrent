@@ -262,6 +262,7 @@ void PeerManager::distribute_piece_requests() {
 PeerManager::WorkAssignment PeerManager::get_work_for_peer(PeerConnection* peer) {
     size_t total_pieces = torrent_->get_piece_hashes().size();
 
+    // prioritize finishing a piece first
     for (size_t piece = 0; piece < total_pieces; ++piece) {
         if (peer->peer_has_piece(piece)) {
             auto piece_state = piece_manager_->get_piece_state(piece);
@@ -269,7 +270,7 @@ PeerManager::WorkAssignment PeerManager::get_work_for_peer(PeerConnection* peer)
             if (piece_state == PieceManager::DOWNLOADING || piece_state == PieceManager::REQUESTED) {
                 auto missing_blocks = piece_manager_->get_missing_blocks(piece);
                 if (!missing_blocks.empty()) {
-                    size_t blocks_to_assign = std::min(missing_blocks.size(), size_t(10)); // Increased from 5
+                    size_t blocks_to_assign = std::min(missing_blocks.size(), size_t(10));
                     std::vector<std::pair<int, int>> selected_blocks;
                     for (size_t i = 0; i < blocks_to_assign; ++i) {
                         selected_blocks.push_back(missing_blocks[i]);
