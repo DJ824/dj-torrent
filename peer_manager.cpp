@@ -175,18 +175,15 @@ void PeerManager::connect_to_new_peers() {
 
     std::cout << "attempting to connect to " << peers_to_connect << " new peers" << std::endl;
 
-    // Get indices of best peers to connect to
     auto best_peer_indices = select_best_peers_to_connect();
 
     for (size_t i = 0; i < std::min(peers_to_connect, best_peer_indices.size()); ++i) {
         size_t peer_index = best_peer_indices[i];
 
-        // Reference the peer directly from pending_peers_ (persistent storage)
         auto& peer = pending_peers_[peer_index];
 
         if (should_connect_to_peer(peer)) {
             try {
-                // Create connection with reference to persistent peer
                 auto connection = std::make_unique<PeerConnection>(peer, this, torrent_, peer_id_);
 
                 if (connection->connect()) {
@@ -211,13 +208,11 @@ void PeerManager::connect_to_new_peers() {
         }
     }
 
-    // Remove successfully connected or failed peers from pending list
-    // Go backwards to avoid index shifting issues
+
     for (int i = static_cast<int>(best_peer_indices.size()) - 1; i >= 0; --i) {
         size_t peer_index = best_peer_indices[i];
         if (peer_index < pending_peers_.size()) {
             const auto& peer = pending_peers_[peer_index];
-            // Remove if connected or exhausted connection attempts
             if (peer.state == Peer::CONNECTED || peer.state == Peer::HANDSHAKED ||
                 peer.connection_attempts_ >= 3) {
                 pending_peers_.erase(pending_peers_.begin() + peer_index);
@@ -258,11 +253,8 @@ void PeerManager::distribute_piece_requests() {
     }
 }
 
-
 PeerManager::WorkAssignment PeerManager::get_work_for_peer(PeerConnection* peer) {
     size_t total_pieces = torrent_->get_piece_hashes().size();
-
-    // prioritize finishing a piece first
     for (size_t piece = 0; piece < total_pieces; ++piece) {
         if (peer->peer_has_piece(piece)) {
             auto piece_state = piece_manager_->get_piece_state(piece);

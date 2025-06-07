@@ -48,8 +48,6 @@ void print_status_line(const PieceManager& piece_manager, const PeerManager& pee
 }
 
 int main(int argc, char* argv[]) {
-
-
   std::string torrent_file = "ubuntu-25.04-desktop-amd64.iso.torrent";
   std::string download_dir = (argc >=3) ? argv[2] : "./downloads/";
   std::cout << "torrent file: " << torrent_file << std::endl;

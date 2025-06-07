@@ -46,6 +46,8 @@ add_executable(dj_torrent
         peer_connection.h
         peer_manager.h
         tracker.h
+        dht_node.cpp
+        dht_node.h
 )
 
 target_link_libraries(dj_torrent

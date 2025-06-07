@@ -169,31 +169,65 @@ bool PieceManager::add_piece_block(int piece_index, int block_offset, const std:
     return true;
 }
 
-// verifies the piece hash and writes to disk
 bool PieceManager::complete_piece(int piece_index) {
+    std::cout << "=== Starting completion of piece " << piece_index << " ===" << std::endl;
+
     if (!is_valid_piece_index(piece_index)) {
+        std::cerr << "Invalid piece index: " << piece_index << std::endl;
         return false;
     }
 
+    std::cout << "Piece index validation passed" << std::endl;
+
+    std::cout << "Starting piece verification..." << std::endl;
     if (!verify_piece(piece_index)) {
-        std::cerr << "piece " << piece_index << " failed SHA-1 verification" << std::endl;
+        std::cerr << "Piece " << piece_index << " failed SHA-1 verification" << std::endl;
         reset_piece_progress(piece_index);
         return false;
     }
+    std::cout << "Piece " << piece_index << " verification passed" << std::endl;
 
+    std::cout << "Starting disk write..." << std::endl;
     if (!write_piece_to_disk(piece_index)) {
-        std::cerr << "failed to write piece " << piece_index << " to disk" << std::endl;
+        std::cerr << "Failed to write piece " << piece_index << " to disk" << std::endl;
         piece_states_[piece_index] = DOWNLOADING;
         return false;
     }
+    std::cout << "Disk write completed successfully" << std::endl;
 
+    std::cout << "Flushing file stream..." << std::endl;
+    if (file_stream_) {
+        file_stream_->flush();
+        if (!file_stream_->good()) {
+            std::cerr << "File stream in bad state after flush" << std::endl;
+        } else {
+            std::cout << "File stream flush successful" << std::endl;
+        }
+    }
+
+    std::cout << "Updating piece state..." << std::endl;
     piece_states_[piece_index] = COMPLETE;
     piece_verified_[piece_index] = true;
-    pieces_downloaded_++;
-    bytes_downloaded_ += get_piece_size(piece_index);
+    std::cout << "Piece state updated to COMPLETE" << std::endl;
 
-    std::cout << "piece " << piece_index << " completed and written to disk" << std::endl;
-    print_progress();
+    std::cout << "Updating download counters..." << std::endl;
+    pieces_downloaded_++;
+    size_t piece_size = get_piece_size(piece_index);
+    bytes_downloaded_ += piece_size;
+    std::cout << "Counters updated - pieces: " << pieces_downloaded_
+              << ", bytes: " << bytes_downloaded_ << std::endl;
+
+    std::cout << "Printing progress..." << std::endl;
+    std::cout << "Piece " << piece_index << " completed and written to disk" << std::endl;
+
+    try {
+        print_progress();
+        std::cout << "Progress print completed" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in print_progress: " << e.what() << std::endl;
+    }
+
+    std::cout << "=== Piece " << piece_index << " completion finished ===" << std::endl;
 
     return true;
 }
@@ -221,8 +255,10 @@ bool PieceManager::has_piece(int piece_index) const {
 }
 
 bool PieceManager::is_complete() const {
-    std::lock_guard<std::mutex> lock(pieces_mutex_);
-    return pieces_downloaded_ == total_pieces_;
+   // std::cout << "DEBUG: Checking is_complete()" << std::endl;
+    bool result = pieces_downloaded_ == total_pieces_;
+    //std::cout << "DEBUG: is_complete() result: " << result << std::endl;
+    return result;
 }
 
 PieceManager::PieceState PieceManager::get_piece_state(int piece_index) const {
@@ -268,13 +304,20 @@ std::vector<char> PieceManager::get_block_data(int piece_index, int block_offset
 }
 
 double PieceManager::get_completion_percentage() const {
-    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    std::cout << "DEBUG: In get_completion_percentage - pieces: " << pieces_downloaded_
+              << ", total: " << total_pieces_ << std::endl;
 
-    if (total_pieces_ == 0) return 0.0;
+    //std::lock_guard<std::mutex> lock(pieces_mutex_);
 
-    return (static_cast<double>(pieces_downloaded_) / static_cast<double>(total_pieces_)) * 100.0;
+    if (total_pieces_ == 0) {
+        std::cout << "DEBUG: total_pieces_ is 0!" << std::endl;
+        return 0.0;
+    }
+
+    double result = (static_cast<double>(pieces_downloaded_) / static_cast<double>(total_pieces_)) * 100.0;
+    std::cout << "DEBUG: Calculated percentage: " << result << std::endl;
+    return result;
 }
-
 size_t PieceManager::get_bytes_downloaded() const {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     return bytes_downloaded_;
@@ -307,16 +350,32 @@ std::vector<std::pair<int, int>> PieceManager::get_missing_blocks(int piece_inde
 }
 
 void PieceManager::print_progress() const {
-    double percentage = get_completion_percentage();
+    std::cout << "DEBUG: Entering print_progress()" << std::endl;
 
-    std::cout << "\rprogress: " << std::fixed << std::setprecision(1)
-              << percentage << "% (" << pieces_downloaded_ << "/" << total_pieces_
-              << " pieces, " << bytes_downloaded_ << "/" << total_bytes_ << " bytes)";
+    try {
+        std::cout << "DEBUG: Calling get_completion_percentage()" << std::endl;
+        double percentage = get_completion_percentage();
+        std::cout << "DEBUG: Got percentage: " << percentage << std::endl;
 
-    if (is_complete()) {
-        std::cout << " - COMPLETE!" << std::endl;
-    } else {
-        std::cout << std::flush;
+        std::cout << "DEBUG: Building progress string..." << std::endl;
+
+        // Simplified progress output - no \r, no complex formatting
+        std::cout << "Progress: " << std::fixed << std::setprecision(1)
+                  << percentage << "% (" << pieces_downloaded_ << "/" << total_pieces_
+                  << " pieces, " << bytes_downloaded_ << "/" << total_bytes_ << " bytes)" << std::endl;
+
+        std::cout << "DEBUG: Progress string printed" << std::endl;
+
+        if (is_complete()) {
+            std::cout << "DOWNLOAD COMPLETE!" << std::endl;
+        }
+
+        std::cout << "DEBUG: print_progress() completed normally" << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "DEBUG: Exception in print_progress: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "DEBUG: Unknown exception in print_progress" << std::endl;
     }
 }
 

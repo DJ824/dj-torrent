@@ -1,5 +1,6 @@
 #include "bencode_parser.h"
 #include <cctype>
+#include <algorithm>
 
 BencodeParser::BencodeValue::BencodeValue(const BencodeString& s)
     : type_(STRING), string_val_(s) {}
@@ -149,4 +150,57 @@ std::shared_ptr<BencodeParser::BencodeValue> BencodeParser::parse_dictionary(con
     }
     ++pos;
     return std::make_shared<BencodeValue>(dict);
+}
+
+std::string BencodeEncoder::encode(const BencodeValue& val) {
+    if (val.is_string()) {
+        return encode_string(val.as_string());
+    } else if (val.is_integer()) {
+        return encode_integer(val.as_integer());
+    } else if (val.is_list()) {
+        return encode_list(val.as_list());
+    } else if (val.is_dict()) {
+        return encode_dict(val.as_dict());
+    }
+    return "";
+}
+
+std::vector<uint8_t> BencodeEncoder::encode_bytes(const BencodeValue& val) {
+    std::string encoded = encode(val);
+    return std::vector<uint8_t>(encoded.begin(), encoded.end());
+}
+
+
+std::string BencodeEncoder::encode_string(const std::string& str) {
+    return std::to_string(str.length()) + ":" + str;
+}
+
+std::string BencodeEncoder::encode_integer(int64_t num) {
+    return "i" + std::to_string(num) + "e";
+}
+
+std::string BencodeEncoder::encode_list(const BencodeList& list) {
+    std::string result = "l";
+    for (const auto& item : list) {
+        result += encode(*item);
+    }
+    result += "e";
+    return result;
+}
+
+std::string BencodeEncoder::encode_dict(const BencodeDict& dict) {
+    std::string result = "d";
+
+    std::vector<std::string> keys;
+    for (const auto& [key, value] : dict) {
+        keys.push_back(key);
+    }
+    std::sort(keys.begin(), keys.end());
+
+    for (const std::string& key : keys) {
+        result += encode_string(key);
+        result += encode(*dict.at(key));
+    }
+    result += "e";
+    return result;
 }

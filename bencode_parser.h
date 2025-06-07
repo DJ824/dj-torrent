@@ -47,3 +47,16 @@ private:
 using BencodeValue = BencodeParser::BencodeValue;
 using BencodeDict = BencodeParser::BencodeDict;
 using BencodeList = BencodeParser::BencodeList;
+
+
+class BencodeEncoder {
+public:
+    static std::string encode(const BencodeValue& value);
+    static std::vector<uint8_t> encode_bytes(const BencodeValue& value);
+
+private:
+    static std::string encode_string(const std::string& str);
+    static std::string encode_integer(int64_t val);
+    static std::string encode_list(const BencodeList& list);
+    static std::string encode_dict(const BencodeDict& dict);
+};
