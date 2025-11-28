@@ -1,4 +1,3 @@
-// PieceBuffer manages a single piece buffer and its block completion bitmap.
 #pragma once
 
 #include <cstdint>
