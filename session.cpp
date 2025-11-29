@@ -10,8 +10,54 @@
 #include <limits>
 #include <sstream>
 #include <unordered_set>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <cerrno>
 
 #include "http_client.h"
+
+std::string format_peer_id_hex(const std::string& peer_id) {
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(peer_id.size() * 2);
+    for (unsigned char c : peer_id) {
+        out.push_back(kHexDigits[c >> 4]);
+        out.push_back(kHexDigits[c & 0x0F]);
+    }
+    return out;
+}
+
+int make_listen_socket(uint16_t port) {
+    int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    int yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);
+
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
+        return -1;
+    }
+    if (::listen(fd, 128) < 0) {
+        ::close(fd);
+        return -1;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    return fd;
+}
+
 
 static std::size_t piece_count(const TorrentFile& t) {
     return t.piece_hashes.size();
@@ -31,16 +77,42 @@ Session::Session(TorrentFile torrent,
       event_loop_([this](Peer& peer, std::vector<Peer::Event>&& events) {
           handle_peer_events(peer, std::move(events));
       }),
-      storage_(torrent_, std::move(download_path)) {
+      storage_(torrent_, download_path) {
     logger_.start();
     piece_manager_.set_piece_complete_callback(
         [this](uint32_t piece_index, const std::vector<uint8_t>& data) {
             if (!storage_.write_piece(piece_index, data)) {
-                logger_.error("Failed to write piece to storage");
+                logger_.error("failed to write piece");
             }
             handle_piece_complete(piece_index);
         });
+
+    int listen_fd = make_listen_socket(listen_port_);
+    if (listen_fd >= 0) {
+        event_loop_.set_listen_socket(
+            listen_fd,
+            [this](int fd, const PeerAddress& addr) {
+                try {
+                    Peer peer =
+                        Peer::from_incoming(fd, addr, torrent_.info_hash, self_peer_id_);
+                    int pfd = peer.fd();
+                    if (event_loop_.add_peer(std::move(peer))) {
+                        ensure_peer_state(pfd);
+                    } else {
+                        ::close(fd);
+                    }
+                } catch (...) {
+                    ::close(fd);
+                }
+            });
+    }
 }
+
+Session::~Session() {
+    stop();
+    logger_.stop();
+}
+
 
 void Session::start() {
     if (start_from_tracker()) {
@@ -50,46 +122,35 @@ void Session::start() {
         return;
     }
     throw std::runtime_error(
-        "Torrent does not include a usable HTTP(S) tracker or any web seeds (url-list)");
+        "torrent does not include a usable HTTP(S)/UDP tracker or any web seeds (url-list)");
 }
 
 bool Session::start_from_tracker() {
     std::vector<std::string> urls = collect_tracker_urls();
-    std::vector<std::string> http_urls;
+    std::vector<std::string> tracker_urls;
     std::unordered_set<std::string> seen;
     for (const auto& url : urls) {
-        if (!is_http_tracker(url)) continue;
+        if (!is_http_tracker(url) && !is_udp_tracker(url)) continue;
         std::string lower = url;
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (seen.insert(lower).second) {
-            http_urls.push_back(url);
+            tracker_urls.push_back(url);
         }
     }
 
-    if (http_urls.empty()) {
-        logger_.warn("no HTTP(S) trackers available in announce or announce-list");
+    if (tracker_urls.empty()) {
+        logger_.warn("no HTTP(S) or UDP trackers available in announce or announce-list");
         return false;
     }
 
-    for (const auto& url : http_urls) {
-        try {
-            logger_.info(std::string("contacting tracker: ") + url);
-            auto res = tracker_client_.announce(url, torrent_);
-            if (res.peers.empty()) {
-                logger_.warn(std::string("tracker returned zero peers: ") + url);
-                continue;
-            }
-            for (const auto& ep : res.peers) {
-                add_peer(PeerAddress{ep.ip, ep.port});
-            }
-            return true;
-        } catch (const std::exception& ex) {
-            logger_.warn(std::string("tracker failed: ") + ex.what());
-        }
+    if (!tracker_thread_.joinable()) {
+        tracker_stop_.store(false, std::memory_order_relaxed);
+        tracker_thread_ = std::thread([this, tracker_urls = std::move(tracker_urls)]() {
+            tracker_worker(tracker_urls);
+        });
     }
-    logger_.warn("all HTTP(S) trackers failed");
-    return false;
+    return true;
 }
 
 bool Session::start_from_web_seeds() {
@@ -113,7 +174,7 @@ bool Session::try_download_from_web_seed(const std::string& base_url) {
             uint64_t offset =
                 static_cast<uint64_t>(idx) * static_cast<uint64_t>(torrent_.piece_length);
             std::string range_value = "bytes=" + std::to_string(offset) + "-" +
-                                      std::to_string(offset + static_cast<uint64_t>(len) - 1);
+                std::to_string(offset + static_cast<uint64_t>(len) - 1);
 
             HttpResponse resp = http_get(parsed,
                                          parsed.path,
@@ -142,7 +203,8 @@ bool Session::try_download_from_web_seed(const std::string& base_url) {
             }
         }
         return true;
-    } catch (const std::exception& ex) {
+    }
+    catch (const std::exception& ex) {
         logger_.error(std::string("web seed failed: ") + ex.what());
         return false;
     }
@@ -154,7 +216,7 @@ std::string Session::build_web_seed_url(const std::string& base) const {
     }
     if (base.size() >= torrent_.name.size() &&
         base.compare(base.size() - torrent_.name.size(), torrent_.name.size(), torrent_.name) ==
-            0) {
+        0) {
         return base;
     }
     if (base.back() == '/') {
@@ -179,23 +241,164 @@ bool Session::is_http_tracker(const std::string& url) {
     return lower.rfind("http://", 0) == 0 || lower.rfind("https://", 0) == 0;
 }
 
+bool Session::is_udp_tracker(const std::string& url) {
+    auto lower = url;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lower.rfind("udp://", 0) == 0;
+}
+
 void Session::add_peer(const PeerAddress& address) {
+    enqueue_peer_candidate(address);
+}
+
+void Session::run_once(int timeout_ms) {
+    maybe_connect_pending_peers();
+    event_loop_.run_once(timeout_ms);
+
+    maybe_connect_pending_peers();
+    maybe_drop_handshake_timeouts();
+    maybe_log_stats();
+}
+
+void Session::run(int timeout_ms) {
+    running_.store(true, std::memory_order_relaxed);
+    while (running_.load(std::memory_order_relaxed)) {
+        run_once(timeout_ms);
+    }
+}
+
+void Session::stop() {
+    running_.store(false, std::memory_order_relaxed);
+    event_loop_.stop();
+    stop_tracker_thread();
+}
+
+std::size_t Session::peer_count() const { return event_loop_.peer_count(); }
+
+void Session::connect_peer_now(const PeerAddress& address) {
     try {
         Peer peer = Peer::connect_outgoing(address, torrent_.info_hash, self_peer_id_);
         int fd = peer.fd();
         if (event_loop_.add_peer(std::move(peer))) {
             ensure_peer_state(fd);
         }
-    } catch (const std::exception& ex) {
+    }
+    catch (const std::exception& ex) {
         logger_.error("Failed to connect to peer");
     }
 }
 
-void Session::run_once(int timeout_ms) { event_loop_.run_once(timeout_ms); }
+void Session::maybe_connect_pending_peers() {
+    static constexpr std::size_t kMaxActivePeers = 50;
+    while (peer_count() < kMaxActivePeers) {
+        PeerAddress next;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            if (pending_peers_.empty()) {
+                break;
+            }
+            next = pending_peers_.front();
+            pending_peers_.pop_front();
+        }
+        connect_peer_now(next);
+    }
+}
 
-void Session::run(int timeout_ms) { event_loop_.run(timeout_ms); }
+void Session::maybe_log_stats() {
+    using namespace std::chrono;
+    auto now = steady_clock::now();
+    if (last_stats_log_.time_since_epoch().count() == 0) {
+        last_stats_log_ = now;
+        return;
+    }
+    if (now - last_stats_log_ < seconds(5)) {
+        return;
+    }
+    last_stats_log_ = now;
+    std::size_t pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending = pending_peers_.size();
+    }
+    std::string msg = "stats: active_peers=" + std::to_string(peer_count()) +
+        " pending_peers=" + std::to_string(pending) +
+        " pex_peers_discovered=" + std::to_string(pex_peers_discovered_);
+    logger_.info(msg);
+}
 
-std::size_t Session::peer_count() const { return event_loop_.peer_count(); }
+void Session::maybe_drop_handshake_timeouts() {
+    using namespace std::chrono;
+    static constexpr auto kHandshakeTimeout = seconds(2);
+    auto now = steady_clock::now();
+    std::vector<int> drop_fds;
+    for (auto& kv : peers_) {
+        const auto& state = kv.second;
+        if (state.handshake_received) {
+            continue;
+        }
+        if (state.connected_at.time_since_epoch().count() == 0) {
+            continue;
+        }
+        if (now - state.connected_at > kHandshakeTimeout) {
+            drop_fds.push_back(kv.first);
+        }
+    }
+    for (int fd : drop_fds) {
+        if (Peer* peer = event_loop_.peer_by_fd(fd)) {
+            logger_.warn(std::string("peer handshake timeout for ") + peer->remote().ip);
+            peer->handle_error();
+        }
+        event_loop_.remove_peer(fd);
+        peers_.erase(fd);
+    }
+}
+
+bool Session::enqueue_peer_candidate(const PeerAddress& address) {
+    std::string key = address.ip + ":" + std::to_string(address.port);
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    if (!known_endpoints_.insert(std::move(key)).second) {
+        return false;
+    }
+    pending_peers_.push_back(address);
+    return true;
+}
+
+void Session::tracker_worker(std::vector<std::string> tracker_urls) {
+    bool any_success = false;
+    for (const auto& url : tracker_urls) {
+        if (tracker_stop_.load(std::memory_order_relaxed)) {
+            break;
+        }
+        try {
+            logger_.info(std::string("contacting tracker: ") + url);
+            auto res = tracker_client_.announce(url, torrent_);
+            if (res.peers.empty()) {
+                logger_.warn(std::string("tracker returned zero peers: ") + url);
+                continue;
+            }
+            logger_.info(std::string("tracker ") + url + " returned " +
+                         std::to_string(res.peers.size()) + " peers");
+            any_success = true;
+            for (const auto& ep : res.peers) {
+                enqueue_peer_candidate(PeerAddress{ep.ip, ep.port});
+            }
+        }
+        catch (const std::exception& ex) {
+            logger_.warn(std::string("tracker failed: ") + ex.what());
+        }
+    }
+    if (!any_success) {
+        logger_.warn("all trackers failed or returned zero peers");
+    }
+}
+
+void Session::stop_tracker_thread() {
+    tracker_stop_.store(true, std::memory_order_relaxed);
+    if (tracker_thread_.joinable()) {
+        tracker_thread_.join();
+    }
+}
 
 void Session::handle_peer_events(Peer& peer, std::vector<Peer::Event>&& events) {
     PeerState& state = ensure_peer_state(peer.fd());
@@ -203,30 +406,61 @@ void Session::handle_peer_events(Peer& peer, std::vector<Peer::Event>&& events) 
     for (auto& ev : events) {
         switch (ev.type) {
         case Peer::EventType::Handshake:
-                logger_.info("received handshake, sending our bitfield");
-                state.remote_id = ev.peer_id;
-                peer.send_bitfield(piece_manager_.have_bitfield());
-                break;
+            state.remote_id = ev.peer_id;
+            state.handshake_received = true;
+            {
+                std::string msg = "received handshake from peer " + peer.remote().ip +
+                    ", sending our bitfield";
+                logger_.info(msg);
+            }
+            peer.send_bitfield(piece_manager_.have_bitfield());
+            peer.send_extended_handshake();
+            break;
         case Peer::EventType::Bitfield:
-                logger_.info("received bitfield");
+            {
+                std::string msg = "received bitfield from peer " + peer.remote().ip;
+                logger_.info(msg);
                 state.bitfield = ev.payload;
+                size_t n = piece_count(torrent_);
+                for (size_t i = 0; i < n; i++) {
+                    if (bitfield_test(state.bitfield, i)) {
+                        piece_manager_.sum_peer_bitfield_ct_[i]++;
+                    }
+                }
+                piece_manager_.update_buckets();
                 state.bitfield.resize(piece_manager_.have_bitfield().size());
-                break;
+            }
+            break;
+        case Peer::EventType::ExtendedHandshake:
+            break;
         case Peer::EventType::Have:
-                logger_.info("received bitfield have");
+            {
+                std::string msg = "received have for piece " +
+                    std::to_string(ev.piece_index) + " from peer " + peer.remote().ip;
+                logger_.info(msg);
                 if (ev.piece_index / 8 >= state.bitfield.size()) {
                     state.bitfield.resize(piece_manager_.have_bitfield().size());
                 }
+                piece_manager_.sum_peer_bitfield_ct_[ev.piece_index]++;
+                // todo o(n) prolly not needed here
+                piece_manager_.update_buckets();
                 bitfield_set(state.bitfield, ev.piece_index);
-                break;
+            }
+            break;
         case Peer::EventType::Choke:
-                logger_.info("peer choking us");
+            {
+                std::string msg = "peer " + peer.remote().ip + " choking us";
+                logger_.info(msg);
                 state.choked = true;
-                break;
+            }
+            break;
         case Peer::EventType::Unchoke:
-            logger_.info("peer unchoking us");
+            {
+                std::string msg = "peer " + peer.remote().ip + " unchoking us";
+                logger_.info(msg);
                 state.choked = false;
-                break;
+            }
+            break;
         case Peer::EventType::Piece:
             {
                 char buf[128];
@@ -236,23 +470,25 @@ void Session::handle_peer_events(Peer& peer, std::vector<Peer::Event>&& events) 
                               ev.piece_index,
                               ev.begin,
                               ev.length);
-                logger_.info(std::string_view(buf, std::strlen(buf)));
+                std::string msg = "peer " + peer.remote().ip + " " + std::string(buf);
+                logger_.info(msg);
             }
-            if (piece_manager_.handle_block(ev.piece_index, ev.begin, ev.payload)) {
-                if (state.inflight_requests > 0) {
-                    --state.inflight_requests;
-                }
+            if (state.inflight_requests > 0) {
+                --state.inflight_requests;
             }
+            (void)piece_manager_.handle_block(ev.piece_index, ev.begin, ev.payload);
             break;
-            case Peer::EventType::Request: {
-                    char buf[128];
-                    std::snprintf(buf,
-                                  sizeof(buf),
-                                  "received request piece=%u begin=%u len=%u",
-                                  ev.piece_index,
-                                  ev.begin,
-                                  ev.length);
-                    logger_.info(std::string_view(buf, std::strlen(buf)));
+        case Peer::EventType::Request:
+            {
+                char buf[128];
+                std::snprintf(buf,
+                              sizeof(buf),
+                              "received request piece=%u begin=%u len=%u",
+                              ev.piece_index,
+                              ev.begin,
+                              ev.length);
+                std::string msg = "peer " + peer.remote().ip + " " + std::string(buf);
+                logger_.info(msg);
                 if (!piece_manager_.have_piece(ev.piece_index)) {
                     break;
                 }
@@ -272,14 +508,19 @@ void Session::handle_peer_events(Peer& peer, std::vector<Peer::Event>&& events) 
                 }
                 break;
             }
-            default:
-                break;
+        case Peer::EventType::Pex:
+            handle_pex(peer, ev.payload);
+            break;
+        default:
+            break;
         }
     }
 
     maybe_request(peer, state);
 
     if (peer.is_closed()) {
+        std::string msg = "peer " + peer.remote().ip + " closed connection";
+        logger_.info(msg);
         peers_.erase(peer.fd());
     }
 }
@@ -293,22 +534,32 @@ void Session::maybe_request(Peer& peer, PeerState& state) {
     if (interesting && !state.interested) {
         peer.send_interested();
         state.interested = true;
-    } else if (!interesting && state.interested) {
+        std::string msg = "sending interested to peer " + peer.remote().ip;
+        logger_.info(msg);
+    }
+    else if (!interesting && state.interested) {
         peer.send_not_interested();
         state.interested = false;
+        std::string msg = "sending not interested to peer " + peer.remote().ip;
+        logger_.info(msg);
     }
 
     if (state.choked) {
         return;
     }
 
-    constexpr uint32_t kMaxInflightRequestsPerPeer = 16;
+    constexpr uint32_t kMaxInflightRequestsPerPeer = 32;
 
     while (state.inflight_requests < kMaxInflightRequestsPerPeer) {
-        auto req = piece_manager_.next_request_for_peer(state.bitfield);
+        auto req = piece_manager_.next_request_for_peer_rarest(state.bitfield);
         if (!req) {
             break;
         }
+        std::string msg = "sending request to peer " + peer.remote().ip +
+            " piece=" + std::to_string(req->piece_index) +
+            " begin=" + std::to_string(req->begin) +
+            " len=" + std::to_string(req->length);
+        logger_.info(msg);
         peer.send_request(req->piece_index, req->begin, req->length);
         ++state.inflight_requests;
     }
@@ -334,6 +585,7 @@ Session::PeerState& Session::ensure_peer_state(int fd) {
     }
     PeerState state;
     state.bitfield = make_bitfield(piece_count(torrent_));
+    state.connected_at = std::chrono::steady_clock::now();
     auto [inserted_it, _] = peers_.emplace(fd, std::move(state));
     return inserted_it->second;
 }

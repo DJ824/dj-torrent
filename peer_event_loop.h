@@ -7,6 +7,7 @@
 class PeerEventLoop {
 public:
     using EventCallback = std::function<void(Peer&, std::vector<Peer::Event>&&)>;
+    using AcceptCallback = std::function<void(int fd, const PeerAddress& addr)>;
 
     explicit PeerEventLoop(EventCallback cb);
     ~PeerEventLoop();
@@ -17,6 +18,7 @@ public:
     PeerEventLoop& operator=(PeerEventLoop&&) = delete;
 
     bool add_peer(Peer peer);
+    bool set_listen_socket(int fd, AcceptCallback cb);
     void remove_peer(int fd);
     void run_once(int timeout_ms);
     void run(int timeout_ms);
@@ -37,5 +39,7 @@ private:
     int epfd_{-1};
     EventCallback callback_;
     std::unordered_map<int, Entry> peers_;
+    int listen_fd_{-1};
+    AcceptCallback accept_callback_;
     bool running_{false};
 };

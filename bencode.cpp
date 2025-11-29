@@ -6,9 +6,7 @@
 
 namespace bencode {
 
-namespace {
-
-int64_t parse_int64(std::string_view sv) {
+static int64_t parse_int64(std::string_view sv) {
     int64_t value{};
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), value);
     if (ec != std::errc() || ptr != sv.data() + sv.size()) {
@@ -16,8 +14,6 @@ int64_t parse_int64(std::string_view sv) {
     }
     return value;
 }
-
-}  // namespace
 
 Parser::Parser(std::string input, std::optional<std::string> track_key)
     : input_(std::move(input)), track_key_(std::move(track_key)) {}
@@ -105,7 +101,7 @@ Value Parser::parse_list(size_t& pos) {
     while (peek(pos) != 'e') {
         out.push_back(parse_value(pos));
     }
-    ++pos;  // consume 'e'
+    ++pos;
     return Value{out};
 }
 
@@ -124,7 +120,7 @@ Value Parser::parse_dict(size_t& pos) {
         }
         out.emplace(key, std::move(value));
     }
-    ++pos;  // consume 'e'
+    ++pos;
     return Value{out};
 }
 

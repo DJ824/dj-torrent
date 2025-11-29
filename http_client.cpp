@@ -13,8 +13,10 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <poll.h>
+#include <fcntl.h>
 
-int connect_socket(const std::string& host, const std::string& port) {
+int connect_socket(const std::string& host, const std::string& port, int timeout_ms) {
     addrinfo hints{};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
@@ -29,9 +31,38 @@ int connect_socket(const std::string& host, const std::string& port) {
     for (addrinfo* ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+        if (timeout_ms <= 0) {
+            if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+                break;
+            }
+            close(fd);
+            fd = -1;
+            continue;
+        }
+
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc == 0) {
+            fcntl(fd, F_SETFL, flags);
             break;
         }
+        if (rc < 0 && errno == EINPROGRESS) {
+            pollfd pfd{};
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            int pres = ::poll(&pfd, 1, timeout_ms);
+            if (pres > 0 && (pfd.revents & POLLOUT)) {
+                int err = 0;
+                socklen_t len = sizeof(err);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+                    fcntl(fd, F_SETFL, flags);
+                    break;
+                }
+            }
+        }
+
         close(fd);
         fd = -1;
     }
@@ -131,8 +162,17 @@ struct Connection {
     }
 };
 
-Connection make_connection(const HttpUrl& url) {
-    int fd = connect_socket(url.host, url.port_str);
+Connection make_connection(const HttpUrl& url, int timeout_ms) {
+    int fd = connect_socket(url.host, url.port_str, timeout_ms);
+
+    if (timeout_ms > 0) {
+        timeval tv{};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
     if (!url.use_tls) {
         Connection c;
         c.fd = fd;
@@ -284,7 +324,8 @@ std::string decode_chunked(std::string_view body) {
 HttpResponse http_get(const HttpUrl& url,
                       const std::string& path,
                       const std::vector<std::pair<std::string, std::string>>& headers,
-                      std::size_t max_response_bytes) {
+                      std::size_t max_response_bytes,
+                      int timeout_ms) {
     std::ostringstream req;
     req << "GET " << path << " HTTP/1.1\r\n";
     req << "Host: " << url.host;
@@ -298,7 +339,7 @@ HttpResponse http_get(const HttpUrl& url,
     req << "Connection: close\r\n";
     req << "\r\n";
 
-    Connection conn = make_connection(url);
+    Connection conn = make_connection(url, timeout_ms);
     conn.write_all(req.str());
     std::string raw = conn.read_all(max_response_bytes);
 
@@ -332,4 +373,11 @@ HttpResponse http_get(const HttpUrl& url,
     }
 
     return HttpResponse{std::move(status_line), status_code, std::move(header_block), std::move(body)};
+}
+
+HttpResponse http_get(const HttpUrl& url,
+                      const std::string& path,
+                      const std::vector<std::pair<std::string, std::string>>& headers,
+                      std::size_t max_response_bytes) {
+    return http_get(url, path, headers, max_response_bytes, -1);
 }

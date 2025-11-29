@@ -30,6 +30,18 @@ public:
                               std::string event = "started");
 
 private:
+    AnnounceResponse announce_http(const std::string& announce_url,
+                                   const TorrentFile& torrent,
+                                   int64_t downloaded,
+                                   int64_t uploaded,
+                                   const std::string& event);
+
+    AnnounceResponse announce_udp(const std::string& announce_url,
+                                  const TorrentFile& torrent,
+                                  int64_t downloaded,
+                                  int64_t uploaded,
+                                  const std::string& event);
+
     std::string peer_id_;
     uint16_t port_;
 };

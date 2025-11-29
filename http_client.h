@@ -32,3 +32,9 @@ HttpResponse http_get(const HttpUrl& url,
                       const std::string& path,
                       const std::vector<std::pair<std::string, std::string>>& headers = {},
                       std::size_t max_response_bytes = std::numeric_limits<std::size_t>::max());
+
+HttpResponse http_get(const HttpUrl& url,
+                      const std::string& path,
+                      const std::vector<std::pair<std::string, std::string>>& headers,
+                      std::size_t max_response_bytes,
+                      int timeout_ms);

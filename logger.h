@@ -1,6 +1,6 @@
 #pragma once
 
-#include "spsc.h"
+#include "include/spsc.h"
 
 #include <atomic>
 #include <string_view>

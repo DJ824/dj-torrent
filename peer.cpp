@@ -11,6 +11,9 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <cstring>
+
+#include "bencode.h"
 
 
 static int make_nonblocking_socket(const PeerAddress& addr) {
@@ -93,8 +96,20 @@ Peer Peer::connect_outgoing(const PeerAddress& addr,
     return p;
 }
 
+Peer Peer::from_incoming(int fd,
+                         const PeerAddress& addr,
+                         const std::array<uint8_t, 20>& info_hash,
+                         std::string self_peer_id) {
+    Peer p(fd, addr, info_hash, std::move(self_peer_id));
+    std::cout << "accepted incoming peer from addr " << addr.ip << std::endl;
+    p.state_ = State::Handshaking;
+    return p;
+}
+
 void Peer::close() {
     if (fd_ >= 0) {
+        std::cerr << "closing peer connection to " << remote_.ip << ":" << remote_.port
+                  << std::endl;
         ::close(fd_);
         fd_ = -1;
     }
@@ -103,11 +118,17 @@ void Peer::close() {
     incoming_.clear();
 }
 
-void Peer::handle_error() { close(); }
+void Peer::handle_error() {
+    std::cerr << "peer " << remote_.ip << ":" << remote_.port << " signaled error"
+              << std::endl;
+    close();
+}
 
 void Peer::handle_writable() {
     if (state_ == State::Connecting) {
         if (!check_socket_connected()) {
+            std::cerr << "peer connect failed for " << remote_.ip << ":" << remote_.port
+                      << std::endl;
             close();
             return;
         }
@@ -275,6 +296,39 @@ void Peer::parse_messages() {
                 }
                 break;
             }
+            case 20: {
+                if (payload_len >= 1) {
+                    uint8_t ext_id = payload[0];
+                    const uint8_t* ext_payload = payload + 1;
+                    uint32_t ext_len = payload_len - 1;
+                    if (ext_id == 0) {
+                        std::vector<uint8_t> data(ext_payload, ext_payload + ext_len);
+                        events_.push_back(Event{EventType::ExtendedHandshake, {}, std::move(data),
+                                                0, 0, 0});
+                        try {
+                            std::string s(reinterpret_cast<const char*>(data.data()),
+                                          data.size());
+                            bencode::Parser parser(std::move(s));
+                            bencode::Value v = parser.parse();
+                            const auto& dict = bencode::as_dict(v);
+                            if (const auto* m = bencode::find_field(dict, "m")) {
+                                const auto& md = bencode::as_dict(*m);
+                                if (const auto* utpex = bencode::find_field(md, "ut_pex")) {
+                                    int64_t id = bencode::as_int(*utpex);
+                                    if (id > 0 && id < 256) {
+                                        remote_ut_pex_id_ = static_cast<uint8_t>(id);
+                                    }
+                                }
+                            }
+                        } catch (...) {
+                        }
+                    } else if (ext_id == remote_ut_pex_id_ && remote_ut_pex_id_ != 0) {
+                        std::vector<uint8_t> data(ext_payload, ext_payload + ext_len);
+                        events_.push_back(Event{EventType::Pex, {}, std::move(data), 0, 0, 0});
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -341,6 +395,60 @@ void Peer::send_piece(uint32_t piece_index, uint32_t begin, const std::vector<ui
     queue_bytes(std::move(msg));
 }
 
+void Peer::send_extended_handshake() {
+    if (extended_handshake_sent_) {
+        return;
+    }
+    std::string payload = "d1:md6:ut_pexi";
+    payload += std::to_string(static_cast<int>(kLocalUtPexId_));
+    payload += "ee";
+
+    uint32_t ext_len = static_cast<uint32_t>(1 + payload.size());
+    uint32_t msg_len = 1 + ext_len;
+    std::vector<uint8_t> msg(4 + msg_len);
+    write_be32(msg.data(), msg_len);
+    msg[4] = 20;
+    msg[5] = 0;
+    std::memcpy(msg.data() + 6, payload.data(), payload.size());
+    queue_bytes(std::move(msg));
+    extended_handshake_sent_ = true;
+}
+
+void Peer::send_ut_pex(const std::vector<PeerAddress>& added) {
+    if (added.empty()) {
+        return;
+    }
+    std::string compact;
+    compact.reserve(6 * added.size());
+    for (const auto& a : added) {
+        in_addr addr{};
+        if (inet_pton(AF_INET, a.ip.c_str(), &addr) != 1) {
+            continue;
+        }
+        compact.append(reinterpret_cast<const char*>(&addr), sizeof(addr));
+        uint16_t port_be = htons(a.port);
+        compact.append(reinterpret_cast<const char*>(&port_be), sizeof(port_be));
+    }
+    if (compact.empty()) {
+        return;
+    }
+
+    std::string payload = "d5:added";
+    payload += std::to_string(compact.size());
+    payload += ":";
+    payload += compact;
+    payload += "e";
+
+    uint32_t ext_len = static_cast<uint32_t>(1 + payload.size());
+    uint32_t msg_len = 1 + ext_len;
+    std::vector<uint8_t> msg(4 + msg_len);
+    write_be32(msg.data(), msg_len);
+    msg[4] = 20;
+    msg[5] = kLocalUtPexId_;
+    std::memcpy(msg.data() + 6, payload.data(), payload.size());
+    queue_bytes(std::move(msg));
+}
+
 void Peer::queue_bytes(std::vector<uint8_t> bytes) {
     outgoing_.push_back(std::move(bytes));
 }
@@ -349,6 +457,7 @@ void Peer::ensure_handshake_sent() {
     if (handshake_sent_) {
         return;
     }
+    // std::cout << "sending handshake" << std::endl;
     queue_bytes(make_handshake(info_hash_, self_peer_id_));
     handshake_sent_ = true;
 }

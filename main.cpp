@@ -1,5 +1,3 @@
-// Minimal demo that reads a .torrent file and prints key metadata.
-
 #include "session.h"
 #include "torrent_file.h"
 #include "tracker_client.h"
@@ -8,12 +6,10 @@
 #include <iostream>
 
 int main(int argc, char** argv) {
-
-
     try {
         std::filesystem::path torrent_path;
         if (argc < 2) {
-            torrent_path = "../data/ubuntu-25.10-desktop-amd64.iso.torrent";
+            torrent_path = "../data/1059680EA3988805BA59A4E2D24C7CDA4FD942DD.torrent";
         } else {
             torrent_path = argv[1];
         }

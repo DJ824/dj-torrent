@@ -1,17 +1,26 @@
 #include "peer_event_loop.h"
 
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <array>
+#include <cerrno>
 
 PeerEventLoop::PeerEventLoop(EventCallback cb) : callback_(std::move(cb)) {
     epfd_ = epoll_create1(0);
 }
 
 PeerEventLoop::~PeerEventLoop() {
+    if (listen_fd_ >= 0) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+    }
     if (epfd_ >= 0) {
-        close(epfd_);
+        ::close(epfd_);
     }
 }
 
@@ -34,6 +43,24 @@ bool PeerEventLoop::add_peer(Peer peer) {
     return true;
 }
 
+bool PeerEventLoop::set_listen_socket(int fd, AcceptCallback cb) {
+    if (epfd_ < 0) {
+        return false;
+    }
+    listen_fd_ = fd;
+    accept_callback_ = std::move(cb);
+
+    epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        listen_fd_ = -1;
+        accept_callback_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
 void PeerEventLoop::remove_peer(int fd) {
     if (epfd_ >= 0) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
@@ -43,7 +70,7 @@ void PeerEventLoop::remove_peer(int fd) {
 
 void PeerEventLoop::run(int timeout_ms) {
     running_ = true;
-    while (running_ && !peers_.empty()) {
+    while (running_ && (listen_fd_ >= 0 || !peers_.empty())) {
         run_once(timeout_ms);
     }
 }
@@ -78,6 +105,44 @@ void PeerEventLoop::run_once(int timeout_ms) {
 
     for (int i = 0; i < n; ++i) {
         int fd = events[i].data.fd;
+        if (fd == listen_fd_) {
+            if ((events[i].events & EPOLLIN) && accept_callback_) {
+                for (;;) {
+                    sockaddr_storage ss{};
+                    socklen_t slen = sizeof(ss);
+                    int cfd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&ss), &slen);
+                    if (cfd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
+                        }
+                        break;
+                    }
+                    int flags = fcntl(cfd, F_GETFL, 0);
+                    fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+
+                    PeerAddress addr{};
+                    if (ss.ss_family == AF_INET) {
+                        auto* sin = reinterpret_cast<sockaddr_in*>(&ss);
+                        char ipbuf[INET_ADDRSTRLEN]{};
+                        inet_ntop(AF_INET, &sin->sin_addr, ipbuf, sizeof(ipbuf));
+                        addr.ip = ipbuf;
+                        addr.port = ntohs(sin->sin_port);
+                    } else if (ss.ss_family == AF_INET6) {
+                        auto* sin6 = reinterpret_cast<sockaddr_in6*>(&ss);
+                        char ipbuf[INET6_ADDRSTRLEN]{};
+                        inet_ntop(AF_INET6, &sin6->sin6_addr, ipbuf, sizeof(ipbuf));
+                        addr.ip = ipbuf;
+                        addr.port = ntohs(sin6->sin6_port);
+                    } else {
+                        ::close(cfd);
+                        continue;
+                    }
+
+                    accept_callback_(cfd, addr);
+                }
+            }
+            continue;
+        }
         auto it = peers_.find(fd);
         if (it == peers_.end()) {
             continue;

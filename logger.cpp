@@ -5,8 +5,36 @@
 #include <cstring>
 #include <iostream>
 
-AsyncLogger::AsyncLogger() = default;
 
+static const char* level_tag(AsyncLogger::Level level) {
+    switch (level) {
+        case AsyncLogger::Level::Info:
+            return "info";
+        case AsyncLogger::Level::Warn:
+            return "warn";
+        case AsyncLogger::Level::Error:
+            return "error";
+    }
+    return "info";
+}
+
+static std::ostream& level_stream(AsyncLogger::Level level) {
+    if (level == AsyncLogger::Level::Error) {
+        return std::cerr;
+    }
+    return std::cout;
+}
+
+static void write_line(AsyncLogger::Level level, const char* msg, std::size_t len) {
+    auto& os = level_stream(level);
+    os << '[' << level_tag(level) << "] ";
+    os.write(msg, static_cast<std::streamsize>(len));
+    os.put('\n');
+    os.flush();
+}
+
+
+AsyncLogger::AsyncLogger() = default;
 AsyncLogger::~AsyncLogger() { stop(); }
 
 void AsyncLogger::start() {
@@ -39,35 +67,12 @@ void AsyncLogger::log(Level level, std::string_view msg) {
 void AsyncLogger::run() {
     while (running_.load(std::memory_order_relaxed)) {
         if (auto rec = queue_.dequeue()) {
-            std::ostream& os = (rec->level == Level::Error) ? std::cerr : std::cout;
-            switch (rec->level) {
-                case Level::Info:
-                    os << "[info] ";
-                    break;
-                case Level::Warn:
-                    os << "[warn] ";
-                    break;
-                case Level::Error:
-                    os << "[error] ";
-                    break;
-            }
-            os.write(rec->msg, rec->len);
-            os << std::endl;
+            write_line(rec->level, rec->msg, rec->len);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
-    // Drain remaining messages.
     while (auto rec = queue_.dequeue()) {
-        std::ostream& os = (rec->level == Level::Error) ? std::cerr : std::cout;
-        if (rec->level == Level::Info) {
-            os << "[info] ";
-        } else if (rec->level == Level::Warn) {
-            os << "[warn] ";
-        } else {
-            os << "[error] ";
-        }
-        os.write(rec->msg, rec->len);
-        os << std::endl;
+        write_line(rec->level, rec->msg, rec->len);
     }
 }

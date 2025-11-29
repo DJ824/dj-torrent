@@ -16,7 +16,7 @@ static void ensure_parent_exists(const std::filesystem::path& p) {
     std::filesystem::create_directories(parent);
 }
 
-int open_file_rw(const std::filesystem::path& path, int64_t length) {
+static int open_file_rw(const std::filesystem::path& path, int64_t length) {
     int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
     if (fd < 0) {
         return -1;

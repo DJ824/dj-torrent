@@ -3,6 +3,7 @@
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -44,11 +45,62 @@ PieceManager::PieceManager(const TorrentFile& torrent, std::size_t block_size)
         pieces_[i].blocks = blocks;
     }
     have_bitfield_ = make_bitfield(piece_count);
+    sum_peer_bitfield_ct_.assign(piece_count, 0);
+    piece_buckets_.clear();
+    piece_buckets_.resize(piece_count + 1);
 }
 
 void PieceManager::set_piece_complete_callback(
     std::function<void(uint32_t, const std::vector<uint8_t>&)> cb) {
     on_complete_ = std::move(cb);
+}
+
+std::optional<PieceManager::Request> PieceManager::next_request_for_peer_rarest(
+    const std::vector<uint8_t>& peer_bitfield) {
+    std::size_t piece_count = pieces_.size();
+    auto rarity_opt = lowest_nonempty_bucket();
+    if (!rarity_opt) {
+        return std::nullopt;
+    }
+
+    for (std::size_t rarity = *rarity_opt; rarity < piece_buckets_.size(); ++rarity) {
+        const auto& bucket = piece_buckets_[rarity];
+        for (std::size_t piece_index : bucket) {
+            if (piece_index >= piece_count) {
+                continue;
+            }
+            if (have_piece(static_cast<uint32_t>(piece_index))) {
+                continue;
+            }
+            if (!bitfield_test(peer_bitfield, static_cast<uint32_t>(piece_index))) {
+                continue;
+            }
+
+            PieceState& ps = pieces_[piece_index];
+            if (!ps.buffer) {
+                ps.buffer = std::make_unique<PieceBuffer>(
+                    piece_index, piece_length_for(static_cast<uint32_t>(piece_index)),
+                    block_size_);
+            }
+
+            for (std::size_t b = 0; b < ps.blocks; ++b) {
+                if (ps.requested[b]) {
+                    continue;
+                }
+                ps.requested[b] = true;
+                uint32_t begin = static_cast<uint32_t>(b * block_size_);
+                std::size_t piece_len =
+                    piece_length_for(static_cast<uint32_t>(piece_index));
+                std::size_t remaining = piece_len - begin;
+                uint32_t length =
+                    static_cast<uint32_t>(std::min<std::size_t>(remaining, block_size_));
+                // std::cout << piece_index << std::endl;
+                return Request{static_cast<uint32_t>(piece_index), begin, length};
+            }
+        }
+    }
+
+    return std::nullopt;
 }
 
 std::optional<PieceManager::Request> PieceManager::next_request_for_peer(
@@ -84,12 +136,43 @@ std::optional<PieceManager::Request> PieceManager::next_request_for_peer(
     return std::nullopt;
 }
 
+
+void PieceManager::update_buckets() {
+    for (auto& bucket : piece_buckets_) {
+        bucket.clear();
+    }
+    if (sum_peer_bitfield_ct_.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < sum_peer_bitfield_ct_.size(); ++i) {
+        uint32_t count = sum_peer_bitfield_ct_[i];
+        if (count == 0) {
+            continue;
+        }
+        std::size_t bucket_index =
+            std::min<std::size_t>(count, piece_buckets_.size() - 1);
+        piece_buckets_[bucket_index].push_back(i);
+    }
+}
+
+std::optional<std::size_t> PieceManager::lowest_nonempty_bucket() const {
+    for (std::size_t rarity = 1; rarity < piece_buckets_.size(); ++rarity) {
+        if (!piece_buckets_[rarity].empty()) {
+            return rarity;
+        }
+    }
+    return std::nullopt;
+}
+
 bool PieceManager::handle_block(uint32_t piece_index,
                                 uint32_t begin,
                                 const std::vector<uint8_t>& data) {
     if (piece_index >= pieces_.size()) {
         return false;
     }
+
+    static int NUM_PIECES = torrent_.piece_hashes.size();
+
     if (have_piece(piece_index)) {
         return false;
     }
@@ -115,10 +198,16 @@ bool PieceManager::handle_block(uint32_t piece_index,
         }
         set_have(piece_index);
         std::cout << "piece " << piece_index << " complete\n";
+        ++piece_ct_;
         if (on_complete_) {
             on_complete_(piece_index, ps.buffer->data());
         }
         ps.buffer.reset();
+
+    }
+    if (piece_ct_ == NUM_PIECES) {
+        std::cout << "torrent download complete\n";
+        exit(1);
     }
     return true;
 }
@@ -151,4 +240,8 @@ void PieceManager::reset_piece(uint32_t piece_index) {
     PieceState& ps = pieces_[piece_index];
     ps.buffer.reset();
     std::fill(ps.requested.begin(), ps.requested.end(), false);
+}
+
+void PieceManager::rarest_first() {
+
 }

@@ -18,6 +18,7 @@ public:
     enum class EventType {
         Handshake,
         KeepAlive,
+        ExtendedHandshake,
         Choke,
         Unchoke,
         Interested,
@@ -27,6 +28,7 @@ public:
         Request,
         Piece,
         Cancel,
+        Pex,
     };
 
     struct Event {
@@ -41,6 +43,10 @@ public:
     static Peer connect_outgoing(const PeerAddress& addr,
                                  const std::array<uint8_t, 20>& info_hash,
                                  std::string self_peer_id);
+    static Peer from_incoming(int fd,
+                              const PeerAddress& addr,
+                              const std::array<uint8_t, 20>& info_hash,
+                              std::string self_peer_id);
 
     ~Peer();
     Peer(Peer&&) noexcept;
@@ -69,6 +75,10 @@ public:
     void send_cancel(uint32_t piece_index, uint32_t begin, uint32_t length);
     void send_bitfield(const std::vector<uint8_t>& bitfield);
     void send_piece(uint32_t piece_index, uint32_t begin, const std::vector<uint8_t>& data);
+    void send_extended_handshake();
+    void send_ut_pex(const std::vector<PeerAddress>& added);
+
+    bool supports_ut_pex() const { return remote_ut_pex_id_ != 0; }
 
 private:
     Peer(int fd, PeerAddress addr, std::array<uint8_t, 20> info_hash, std::string self_peer_id);
@@ -99,4 +109,8 @@ private:
     std::size_t outgoing_offset_{0};
 
     std::vector<Event> events_;
+
+    bool extended_handshake_sent_{false};
+    uint8_t remote_ut_pex_id_{0};
+    static constexpr uint8_t kLocalUtPexId_ = 1;
 };
