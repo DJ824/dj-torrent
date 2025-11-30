@@ -5,4 +5,4 @@ includes both sequential and rarest first piece selection algorithms
 
 cap at 100 concurrent peers
 
-https://youtu.be/ztYknEKuh1I
+https://youtu.be/ztYknEKuh1I bottom left corner shows network speeds 
